@@ -12,9 +12,10 @@ import {
   executeWallTiling,
 } from './azulEngine';
 
-// Public demo Supabase project with full anonymous broadcast enabled
-const SUPABASE_URL = 'https://sbxyukhsofjlnmfrhjzu.supabase.co';
+const SUPABASE_URL =
+  import.meta.env.VITE_SUPABASE_URL || 'https://sbxyukhsofjlnmfrhjzu.supabase.co';
 const SUPABASE_KEY =
+  import.meta.env.VITE_SUPABASE_ANON_KEY ||
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNieHl1a2hzb2ZqbG5tZnJoanp1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA4MzQ4MDMsImV4cCI6MjEwNjQxMDgwM30.CBwEIndFTqmXAE3G7EG3rRd1jAAg79gW6GWmK2howl4';
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
@@ -50,7 +51,7 @@ function AzulBoard({
   const [selectedColor, setSelectedColor] = useState<Color | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
-  const turnPlayer = gameState.players[gameState.turnPlayerIndex];
+  const turnPlayer = gameState.players[gameState.turnPlayerIndex] || gameState.players[0];
   const isMyTurn = isLocalMode ? true : turnPlayer.id === myPlayerId;
   const activeBoard = isLocalMode
     ? turnPlayer
@@ -389,7 +390,7 @@ export default function App() {
 
     myName.current = cleanName;
 
-    // 1. Immediately add self to the lobby state so count is at least 1/4
+    // Self-register immediately in local state
     const selfPlayer: Player = {
       id: myId.current,
       name: cleanName,
@@ -398,12 +399,10 @@ export default function App() {
     };
     setPlayers([selfPlayer]);
 
-    // 2. Subscribe to the room broadcast channel
     const channel = supabase.channel(`azul_lobby_${cleanRoom}`, {
       config: { broadcast: { self: false } },
     });
 
-    // Listen for heartbeat and player announcements
     channel
       .on('broadcast', { event: 'PLAYER_PING' }, ({ payload }) => {
         if (!payload?.player) return;
@@ -415,12 +414,11 @@ export default function App() {
             ? prev.map((p) => (p.id === incoming.id ? { ...p, ...incoming } : p))
             : [...prev, incoming];
 
-          // Deterministic Host: lowest alphabetically sorted ID is Host
           const sorted = [...updated].sort((a, b) => a.id.localeCompare(b.id));
           return sorted.map((p, idx) => ({ ...p, isHost: idx === 0 }));
         });
 
-        // Reply back so the newcomer discovers you too
+        // Pong response
         channel.send({
           type: 'broadcast',
           event: 'PLAYER_PONG',
@@ -469,7 +467,6 @@ export default function App() {
           setJoined(true);
           setError(null);
 
-          // Announce presence to anyone currently in the room
           channel.send({
             type: 'broadcast',
             event: 'PLAYER_PING',
