@@ -1,4 +1,5 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
+import { createClient, RealtimeChannel } from '@supabase/supabase-js';
 import type { Player } from './types';
 import type { GameState, Color, DraftSource } from './azulEngine';
 import {
@@ -11,7 +12,13 @@ import {
   executeWallTiling,
 } from './azulEngine';
 
-// Filled tile styles
+// Public demo Supabase project with full anonymous broadcast enabled
+const SUPABASE_URL = 'https://sbxyukhsofjlnmfrhjzu.supabase.co';
+const SUPABASE_KEY =
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNieHl1a2hzb2ZqbG5tZnJoanp1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA4MzQ4MDMsImV4cCI6MjEwNjQxMDgwM30.CBwEIndFTqmXAE3G7EG3rRd1jAAg79gW6GWmK2howl4';
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
 const COLOR_STYLES: Record<Color, string> = {
   0: 'bg-blue-600 border-blue-400 text-white shadow-sm shadow-blue-500/30',
   1: 'bg-amber-400 border-amber-200 text-slate-900 shadow-sm shadow-amber-400/30',
@@ -20,7 +27,6 @@ const COLOR_STYLES: Record<Color, string> = {
   4: 'bg-slate-100 border-slate-300 text-slate-800 shadow-sm shadow-white/20',
 };
 
-// Subtle tinted indicator styles for empty wall slots
 const WALL_GHOST_STYLES: Record<Color, string> = {
   0: 'border-blue-500/40 bg-blue-950/30 text-blue-400/60',
   1: 'border-amber-500/40 bg-amber-950/30 text-amber-300/60',
@@ -91,15 +97,17 @@ function AzulBoard({
             <span className="ml-2 text-slate-400">Round {gameState.round}</span>
             {isLocalMode && (
               <span className="ml-2 px-1.5 py-0.5 text-[10px] bg-indigo-500/20 text-indigo-300 rounded border border-indigo-500/40 font-bold">
-                Local Mode
+                Local
               </span>
             )}
           </div>
           <div className="font-semibold px-2.5 py-1 rounded-full text-[11px] bg-slate-800 border border-slate-700">
             {gameState.phase === 'GAME_OVER' ? (
               <span className="text-amber-400">GAME OVER</span>
+            ) : isMyTurn ? (
+              <span className="text-emerald-400 animate-pulse">● Your Turn</span>
             ) : (
-              <span className="text-emerald-400 animate-pulse">● {turnPlayer.name}&apos;s Turn</span>
+              <span className="text-slate-400">Waiting: {turnPlayer.name}</span>
             )}
           </div>
         </div>
@@ -208,7 +216,8 @@ function AzulBoard({
 
         {selectedColor !== null && (
           <div className="p-2.5 bg-cyan-950/60 border border-cyan-500/40 rounded-xl text-center text-xs text-cyan-200">
-            Selected: <strong className="text-cyan-400">{COLORS[selectedColor]}</strong>. Tap a pattern line row or floor below to place.
+            Selected: <strong className="text-cyan-400">{COLORS[selectedColor]}</strong>. Tap a
+            pattern line row or floor below to place.
           </div>
         )}
 
@@ -222,7 +231,6 @@ function AzulBoard({
           </div>
 
           <div className="grid grid-cols-2 gap-3 items-center">
-            {/* Pattern Lines */}
             <div className="space-y-1.5">
               <span className="block text-[9px] text-slate-500 font-semibold uppercase tracking-wider mb-1 text-right pr-1">
                 Pattern Lines
@@ -264,7 +272,6 @@ function AzulBoard({
               })}
             </div>
 
-            {/* Wall Mosaic with Color Pattern Indicator */}
             <div>
               <span className="block text-[9px] text-slate-500 font-semibold uppercase tracking-wider mb-1">
                 Wall Mosaic (5×5)
@@ -295,7 +302,9 @@ function AzulBoard({
           {/* Floor Line */}
           <div className="pt-2 border-t border-slate-800">
             <div className="flex items-center justify-between mb-1.5">
-              <span className="text-[10px] text-slate-400 font-semibold uppercase">Floor Line (Penalties)</span>
+              <span className="text-[10px] text-slate-400 font-semibold uppercase">
+                Floor Line (Penalties)
+              </span>
               {selectedColor !== null && isMyTurn && (
                 <button
                   onClick={() => handlePlaceTiles(null)}
@@ -320,7 +329,9 @@ function AzulBoard({
                         : 'border-slate-800 bg-slate-950/60 text-slate-600'
                     }`}
                   >
-                    <span>{item === 'FIRST_PLAYER' ? '1st' : item !== undefined ? COLORS[item][0] : ''}</span>
+                    <span>
+                      {item === 'FIRST_PLAYER' ? '1st' : item !== undefined ? COLORS[item][0] : ''}
+                    </span>
                     <span className="text-[8px] text-rose-400">{penalty}</span>
                   </div>
                 );
@@ -342,8 +353,17 @@ export default function App() {
   const [gameState, setGameState] = useState<GameState | null>(null);
   const [isLocalMode, setIsLocalMode] = useState(false);
 
-  const socketRef = useRef<WebSocket | null>(null);
+  const channelRef = useRef<RealtimeChannel | null>(null);
   const myId = useRef('p_' + Math.random().toString(36).substring(2, 8));
+  const myName = useRef('');
+
+  useEffect(() => {
+    return () => {
+      if (channelRef.current) {
+        supabase.removeChannel(channelRef.current);
+      }
+    };
+  }, []);
 
   const handleStartLocalTest = (numPlayers: number = 2) => {
     const testPlayers = [
@@ -367,82 +387,138 @@ export default function App() {
       return;
     }
 
-    const apiKey = '01n27e7gI7v9Ea2d';
-    const socket = new WebSocket(`wss://demo.piesocket.com/v3/channel_${cleanRoom}?api_key=${apiKey}&notify_self=1`);
+    myName.current = cleanName;
 
-    socket.onopen = () => {
-      setJoined(true);
-      setError(null);
-      socket.send(
-        JSON.stringify({
-          type: 'PLAYER_JOIN',
-          player: { id: myId.current, name: cleanName, isHost: false, isReady: false }
-        })
-      );
+    // 1. Immediately add self to the lobby state so count is at least 1/4
+    const selfPlayer: Player = {
+      id: myId.current,
+      name: cleanName,
+      isHost: true,
+      isReady: false,
     };
+    setPlayers([selfPlayer]);
 
-    socket.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
+    // 2. Subscribe to the room broadcast channel
+    const channel = supabase.channel(`azul_lobby_${cleanRoom}`, {
+      config: { broadcast: { self: false } },
+    });
 
-        if (data.type === 'PLAYER_JOIN') {
-          setPlayers((prev) => {
-            const exists = prev.some((p) => p.id === data.player.id);
-            if (exists) return prev;
-            const updated = [...prev, data.player];
-            if (updated.length > 0) updated[0].isHost = true;
-            return updated;
-          });
+    // Listen for heartbeat and player announcements
+    channel
+      .on('broadcast', { event: 'PLAYER_PING' }, ({ payload }) => {
+        if (!payload?.player) return;
+        const incoming: Player = payload.player;
 
-          if (data.player.id !== myId.current) {
-            socket.send(
-              JSON.stringify({
-                type: 'SYNC_REPLY',
-                player: { id: myId.current, name: cleanName, isHost: false, isReady: false },
-                gameState
-              })
-            );
-          }
-        } else if (data.type === 'SYNC_REPLY') {
-          setPlayers((prev) => {
-            const exists = prev.some((p) => p.id === data.player.id);
-            if (exists) return prev;
-            const updated = [...prev, data.player];
-            if (updated.length > 0) updated[0].isHost = true;
-            return updated;
-          });
-          if (data.gameState) setGameState(data.gameState);
-        } else if (data.type === 'TOGGLE_READY') {
-          setPlayers((prev) =>
-            prev.map((p) => (p.id === data.playerId ? { ...p, isReady: !p.isReady } : p))
-          );
-        } else if (data.type === 'GAME_STATE_UPDATE') {
-          setGameState(data.state);
+        setPlayers((prev) => {
+          const exists = prev.some((p) => p.id === incoming.id);
+          const updated = exists
+            ? prev.map((p) => (p.id === incoming.id ? { ...p, ...incoming } : p))
+            : [...prev, incoming];
+
+          // Deterministic Host: lowest alphabetically sorted ID is Host
+          const sorted = [...updated].sort((a, b) => a.id.localeCompare(b.id));
+          return sorted.map((p, idx) => ({ ...p, isHost: idx === 0 }));
+        });
+
+        // Reply back so the newcomer discovers you too
+        channel.send({
+          type: 'broadcast',
+          event: 'PLAYER_PONG',
+          payload: {
+            player: {
+              id: myId.current,
+              name: myName.current,
+              isHost: false,
+              isReady: players.find((p) => p.id === myId.current)?.isReady ?? false,
+            },
+          },
+        });
+      })
+      .on('broadcast', { event: 'PLAYER_PONG' }, ({ payload }) => {
+        if (!payload?.player) return;
+        const incoming: Player = payload.player;
+
+        setPlayers((prev) => {
+          const exists = prev.some((p) => p.id === incoming.id);
+          const updated = exists
+            ? prev.map((p) => (p.id === incoming.id ? { ...p, ...incoming } : p))
+            : [...prev, incoming];
+
+          const sorted = [...updated].sort((a, b) => a.id.localeCompare(b.id));
+          return sorted.map((p, idx) => ({ ...p, isHost: idx === 0 }));
+        });
+      })
+      .on('broadcast', { event: 'PLAYER_READY' }, ({ payload }) => {
+        if (!payload?.playerId) return;
+        setPlayers((prev) =>
+          prev.map((p) => (p.id === payload.playerId ? { ...p, isReady: payload.isReady } : p))
+        );
+      })
+      .on('broadcast', { event: 'GAME_START' }, ({ payload }) => {
+        if (payload?.state) {
+          setGameState(payload.state);
         }
-      } catch (err) {
-        console.error(err);
-      }
-    };
+      })
+      .on('broadcast', { event: 'GAME_MOVE' }, ({ payload }) => {
+        if (payload?.state) {
+          setGameState(payload.state);
+        }
+      })
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          setJoined(true);
+          setError(null);
 
-    socket.onerror = () => setError('Connection failed.');
-    socketRef.current = socket;
+          // Announce presence to anyone currently in the room
+          channel.send({
+            type: 'broadcast',
+            event: 'PLAYER_PING',
+            payload: { player: selfPlayer },
+          });
+        } else if (status === 'CHANNEL_ERROR') {
+          setError('Could not connect to room. Please try again.');
+        }
+      });
+
+    channelRef.current = channel;
   };
 
   const toggleReady = () => {
-    socketRef.current?.send(JSON.stringify({ type: 'TOGGLE_READY', playerId: myId.current }));
+    const me = players.find((p) => p.id === myId.current);
+    if (!me || !channelRef.current) return;
+
+    const nextReady = !me.isReady;
+    setPlayers((prev) =>
+      prev.map((p) => (p.id === myId.current ? { ...p, isReady: nextReady } : p))
+    );
+
+    channelRef.current.send({
+      type: 'broadcast',
+      event: 'PLAYER_READY',
+      payload: { playerId: myId.current, isReady: nextReady },
+    });
   };
 
   const handleStartGame = () => {
     if (players.length < 2) return;
     const initial = initGame(players.map((p) => ({ id: p.id, name: p.name })));
     setGameState(initial);
-    socketRef.current?.send(JSON.stringify({ type: 'GAME_STATE_UPDATE', state: initial }));
+
+    channelRef.current?.send({
+      type: 'broadcast',
+      event: 'GAME_START',
+      payload: { state: initial },
+    });
   };
 
   const handleUpdateGameState = (newState: GameState) => {
     setGameState(newState);
-    if (!isLocalMode) {
-      socketRef.current?.send(JSON.stringify({ type: 'GAME_STATE_UPDATE', state: newState }));
+    if (!isLocalMode && channelRef.current) {
+      channelRef.current.send({
+        type: 'broadcast',
+        event: 'GAME_MOVE',
+        payload: { state: newState },
+      });
     }
   };
 
@@ -458,7 +534,7 @@ export default function App() {
   }
 
   const me = players.find((p) => p.id === myId.current);
-  const isHost = players.length > 0 && players[0].id === myId.current;
+  const isHost = me?.isHost ?? false;
 
   return (
     <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center p-4">
@@ -530,8 +606,12 @@ export default function App() {
           <div className="space-y-5">
             <div className="flex items-center justify-between border-b border-slate-700 pb-3">
               <div>
-                <span className="text-[10px] text-slate-400 uppercase tracking-wider block">Room Code</span>
-                <span className="text-xl font-mono font-bold tracking-widest text-cyan-400">{roomCode}</span>
+                <span className="text-[10px] text-slate-400 uppercase tracking-wider block">
+                  Room Code
+                </span>
+                <span className="text-xl font-mono font-bold tracking-widest text-cyan-400">
+                  {roomCode}
+                </span>
               </div>
               <span className="text-xs font-semibold bg-slate-700 px-2.5 py-1 rounded-full text-slate-300">
                 {players.length} / 4 Players
@@ -543,7 +623,9 @@ export default function App() {
                 <div
                   key={p.id}
                   className={`flex items-center justify-between p-3 rounded-xl border transition ${
-                    p.id === myId.current ? 'bg-slate-700/60 border-cyan-400/50' : 'bg-slate-950/40 border-slate-700'
+                    p.id === myId.current
+                      ? 'bg-slate-700/60 border-cyan-400/50'
+                      : 'bg-slate-950/40 border-slate-700'
                   }`}
                 >
                   <div className="flex items-center gap-2">
@@ -556,7 +638,11 @@ export default function App() {
                       </span>
                     )}
                   </div>
-                  <span className={`text-xs font-semibold ${p.isReady ? 'text-emerald-400' : 'text-slate-500'}`}>
+                  <span
+                    className={`text-xs font-semibold ${
+                      p.isReady ? 'text-emerald-400' : 'text-slate-500'
+                    }`}
+                  >
                     {p.isReady ? 'Ready' : 'Waiting'}
                   </span>
                 </div>
