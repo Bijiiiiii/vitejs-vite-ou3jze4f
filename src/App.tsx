@@ -18,7 +18,13 @@ const SUPABASE_KEY =
   import.meta.env.VITE_SUPABASE_ANON_KEY ||
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNieHl1a2hzb2ZqbG5tZnJoanp1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA4MzQ4MDMsImV4cCI6MjEwNjQxMDgwM30.CBwEIndFTqmXAE3G7EG3rRd1jAAg79gW6GWmK2howl4';
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
+  realtime: {
+    params: {
+      eventsPerSecond: 10,
+    },
+  },
+});
 
 const COLOR_STYLES: Record<Color, string> = {
   0: 'bg-blue-600 border-blue-400 text-white shadow-sm shadow-blue-500/30',
@@ -137,7 +143,6 @@ function AzulBoard({
           </div>
         )}
 
-        {/* 1. FACTORIES & CENTER POOL */}
         <section className="bg-slate-900/70 border border-slate-800/90 rounded-2xl p-3 shadow-lg">
           <h2 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2.5">
             Factories & Center Pool
@@ -222,7 +227,6 @@ function AzulBoard({
           </div>
         )}
 
-        {/* 2. PLAYER BOARD */}
         <section className="bg-slate-900/70 border border-slate-800/90 rounded-2xl p-3 shadow-lg space-y-3">
           <div className="flex items-center justify-between">
             <h2 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
@@ -300,7 +304,6 @@ function AzulBoard({
             </div>
           </div>
 
-          {/* Floor Line */}
           <div className="pt-2 border-t border-slate-800">
             <div className="flex items-center justify-between mb-1.5">
               <span className="text-[10px] text-slate-400 font-semibold uppercase">
@@ -355,8 +358,8 @@ export default function App() {
   const [isLocalMode, setIsLocalMode] = useState(false);
 
   const channelRef = useRef<RealtimeChannel | null>(null);
-  const myId = useRef('p_' + Math.random().toString(36).substring(2, 8));
-  const myName = useRef('');
+  const myId = useRef('p_' + Math.random().toString(36).substring(2, 9));
+  const isReadyRef = useRef(false);
 
   useEffect(() => {
     return () => {
@@ -388,69 +391,73 @@ export default function App() {
       return;
     }
 
-    myName.current = cleanName;
+    if (channelRef.current) {
+      supabase.removeChannel(channelRef.current);
+    }
 
-    // Self-register immediately in local state
-    const selfPlayer: Player = {
+    // Set self immediately
+    const myPlayer: Player = {
       id: myId.current,
       name: cleanName,
       isHost: true,
       isReady: false,
     };
-    setPlayers([selfPlayer]);
+    setPlayers([myPlayer]);
 
-    const channel = supabase.channel(`azul_lobby_${cleanRoom}`, {
-      config: { broadcast: { self: false } },
+    // Create a Supabase channel with Presence enabled
+    const channel = supabase.channel(`azul_room_${cleanRoom}`, {
+      config: {
+        presence: {
+          key: myId.current,
+        },
+      },
     });
 
-    channel
-      .on('broadcast', { event: 'PLAYER_PING' }, ({ payload }) => {
-        if (!payload?.player) return;
-        const incoming: Player = payload.player;
+    const updatePresenceState = () => {
+      const state = channel.presenceState();
+      const list: Player[] = [];
 
-        setPlayers((prev) => {
-          const exists = prev.some((p) => p.id === incoming.id);
-          const updated = exists
-            ? prev.map((p) => (p.id === incoming.id ? { ...p, ...incoming } : p))
-            : [...prev, incoming];
-
-          const sorted = [...updated].sort((a, b) => a.id.localeCompare(b.id));
-          return sorted.map((p, idx) => ({ ...p, isHost: idx === 0 }));
-        });
-
-        // Pong response
-        channel.send({
-          type: 'broadcast',
-          event: 'PLAYER_PONG',
-          payload: {
-            player: {
-              id: myId.current,
-              name: myName.current,
+      Object.values(state).forEach((presences: any) => {
+        presences.forEach((entry: any) => {
+          if (entry.id && entry.name) {
+            list.push({
+              id: entry.id,
+              name: entry.name,
               isHost: false,
-              isReady: players.find((p) => p.id === myId.current)?.isReady ?? false,
-            },
-          },
+              isReady: Boolean(entry.isReady),
+            });
+          }
         });
-      })
-      .on('broadcast', { event: 'PLAYER_PONG' }, ({ payload }) => {
-        if (!payload?.player) return;
-        const incoming: Player = payload.player;
+      });
 
-        setPlayers((prev) => {
-          const exists = prev.some((p) => p.id === incoming.id);
-          const updated = exists
-            ? prev.map((p) => (p.id === incoming.id ? { ...p, ...incoming } : p))
-            : [...prev, incoming];
-
-          const sorted = [...updated].sort((a, b) => a.id.localeCompare(b.id));
-          return sorted.map((p, idx) => ({ ...p, isHost: idx === 0 }));
+      // Include self if presence hasn't echoed back yet
+      if (!list.some((p) => p.id === myId.current)) {
+        list.push({
+          id: myId.current,
+          name: cleanName,
+          isHost: false,
+          isReady: isReadyRef.current,
         });
+      }
+
+      // Sort alphabetically by ID so all devices agree on who the host is
+      const sorted = [...list].sort((a, b) => a.id.localeCompare(b.id));
+      sorted.forEach((p, idx) => {
+        p.isHost = idx === 0;
+      });
+
+      setPlayers(sorted);
+    };
+
+    channel
+      .on('presence', { event: 'sync' }, () => {
+        updatePresenceState();
       })
-      .on('broadcast', { event: 'PLAYER_READY' }, ({ payload }) => {
-        if (!payload?.playerId) return;
-        setPlayers((prev) =>
-          prev.map((p) => (p.id === payload.playerId ? { ...p, isReady: payload.isReady } : p))
-        );
+      .on('presence', { event: 'join' }, () => {
+        updatePresenceState();
+      })
+      .on('presence', { event: 'leave' }, () => {
+        updatePresenceState();
       })
       .on('broadcast', { event: 'GAME_START' }, ({ payload }) => {
         if (payload?.state) {
@@ -462,38 +469,42 @@ export default function App() {
           setGameState(payload.state);
         }
       })
-      .subscribe((status) => {
+      .subscribe(async (status) => {
         if (status === 'SUBSCRIBED') {
           setJoined(true);
           setError(null);
 
-          channel.send({
-            type: 'broadcast',
-            event: 'PLAYER_PING',
-            payload: { player: selfPlayer },
+          // Register in the presence pool
+          await channel.track({
+            id: myId.current,
+            name: cleanName,
+            isReady: false,
           });
-        } else if (status === 'CHANNEL_ERROR') {
-          setError('Could not connect to room. Please try again.');
+        } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          setError('Connection failed. Make sure your internet is connected.');
         }
       });
 
     channelRef.current = channel;
   };
 
-  const toggleReady = () => {
+  const toggleReady = async () => {
+    if (!channelRef.current) return;
+    const newReady = !isReadyRef.current;
+    isReadyRef.current = newReady;
+
     const me = players.find((p) => p.id === myId.current);
-    if (!me || !channelRef.current) return;
+    if (me) {
+      setPlayers((prev) =>
+        prev.map((p) => (p.id === myId.current ? { ...p, isReady: newReady } : p))
+      );
 
-    const nextReady = !me.isReady;
-    setPlayers((prev) =>
-      prev.map((p) => (p.id === myId.current ? { ...p, isReady: nextReady } : p))
-    );
-
-    channelRef.current.send({
-      type: 'broadcast',
-      event: 'PLAYER_READY',
-      payload: { playerId: myId.current, isReady: nextReady },
-    });
+      await channelRef.current.track({
+        id: myId.current,
+        name: me.name,
+        isReady: newReady,
+      });
+    }
   };
 
   const handleStartGame = () => {
