@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { createClient, RealtimeChannel } from '@supabase/supabase-js';
 import type { Player } from './types';
-import type { GameState, Color, DraftSource } from './azulEngine';
+import type { GameState, Color, DraftSource, PlayerBoard } from './azulEngine';
 import {
   initGame,
   COLORS,
@@ -42,6 +42,87 @@ const WALL_GHOST_STYLES: Record<Color, string> = {
   4: 'border-slate-300/40 bg-slate-800/30 text-slate-300/60',
 };
 
+// Compact read-only board for inspecting opponents
+function MiniOpponentBoard({ player }: { player: PlayerBoard }) {
+  return (
+    <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-2.5 space-y-2">
+      <div className="flex items-center justify-between text-xs border-b border-slate-800/80 pb-1.5">
+        <span className="font-bold text-slate-200">{player.name}</span>
+        <span className="font-semibold text-cyan-400">{player.score} pts</span>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2 items-center">
+        {/* Pattern Lines */}
+        <div className="space-y-1">
+          {player.patternLines.map((line, r) => (
+            <div key={r} className="flex justify-end gap-1">
+              {Array.from({ length: line.capacity }).map((_, slotIdx) => {
+                const isFilled = slotIdx < line.count;
+                return (
+                  <div
+                    key={slotIdx}
+                    className={`w-3.5 h-3.5 rounded text-[8px] flex items-center justify-center font-bold border ${
+                      isFilled && line.color !== null
+                        ? COLOR_STYLES[line.color]
+                        : 'border-slate-800 bg-slate-900/50'
+                    }`}
+                  >
+                    {isFilled && line.color !== null ? COLORS[line.color][0] : ''}
+                  </div>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+
+        {/* 5x5 Mini Wall */}
+        <div className="grid grid-cols-5 gap-0.5 bg-slate-900/60 p-1 rounded-lg border border-slate-800/80">
+          {WALL_LAYOUT.map((row, r) =>
+            row.map((wallColor, c) => {
+              const isTiled = player.wall[r][c];
+              return (
+                <div
+                  key={`${r}-${c}`}
+                  className={`w-full aspect-square rounded-[2px] flex items-center justify-center text-[7px] font-bold ${
+                    isTiled
+                      ? COLOR_STYLES[wallColor]
+                      : `${WALL_GHOST_STYLES[wallColor]} opacity-40 border-dashed`
+                  }`}
+                >
+                  {isTiled ? COLORS[wallColor][0] : ''}
+                </div>
+              );
+            })
+          )}
+        </div>
+      </div>
+
+      {/* Floor line indicator */}
+      <div className="flex items-center gap-1 pt-1 border-t border-slate-800/60">
+        <span className="text-[9px] text-slate-500 font-semibold uppercase">Floor:</span>
+        {player.floor.length === 0 ? (
+          <span className="text-[9px] text-slate-600 italic">Clear</span>
+        ) : (
+          <div className="flex gap-1">
+            {player.floor.map((item, fIdx) => (
+              <span
+                key={fIdx}
+                className={`text-[8px] px-1 py-0.2 rounded font-bold ${
+                  item === 'FIRST_PLAYER'
+                    ? 'bg-amber-400/20 text-amber-300'
+                    : COLOR_STYLES[item]
+                }`}
+              >
+                {item === 'FIRST_PLAYER' ? '1st' : COLORS[item][0]}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function AzulBoard({
   gameState,
   onUpdateState,
@@ -56,12 +137,18 @@ function AzulBoard({
   const [selectedSource, setSelectedSource] = useState<DraftSource | null>(null);
   const [selectedColor, setSelectedColor] = useState<Color | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [viewingPlayerId, setViewingPlayerId] = useState<string | null>(null);
 
   const turnPlayer = gameState.players[gameState.turnPlayerIndex] || gameState.players[0];
   const isMyTurn = isLocalMode ? true : turnPlayer.id === myPlayerId;
-  const activeBoard = isLocalMode
+
+  // The player whose interactive board you are playing on:
+  const activeMyBoard = isLocalMode
     ? turnPlayer
     : gameState.players.find((p) => p.id === myPlayerId) || gameState.players[0];
+
+  // List of other players to view
+  const opponents = gameState.players.filter((p) => p.id !== activeMyBoard.id);
 
   const handleSelectDraft = (source: DraftSource, color: Color) => {
     if (!isMyTurn || gameState.phase !== 'FACTORY_OFFER') return;
@@ -80,6 +167,7 @@ function AzulBoard({
         targetRow,
       });
 
+      // Clear selections immediately
       setSelectedSource(null);
       setSelectedColor(null);
       setActionError(null);
@@ -94,9 +182,9 @@ function AzulBoard({
       setActionError(err.message || 'Illegal placement move');
     }
   };
-
   return (
-    <div className="flex flex-col min-h-screen bg-slate-950 text-slate-100 pb-12 font-sans select-none">
+    <div className="flex flex-col min-h-screen bg-slate-950 text-slate-100 pb-16 font-sans select-none">
+      {/* HEADER */}
       <header className="bg-slate-900 border-b border-slate-800 p-3 sticky top-0 z-20 shadow-md">
         <div className="max-w-md mx-auto flex items-center justify-between text-xs">
           <div>
@@ -119,19 +207,24 @@ function AzulBoard({
           </div>
         </div>
 
+        {/* SCOREBOARD BAR */}
         <div className="max-w-md mx-auto flex items-center justify-around gap-2 mt-2 pt-2 border-t border-slate-800/80">
           {gameState.players.map((p, idx) => (
-            <div
+            <button
               key={p.id}
-              className={`flex-1 text-center py-1 px-1.5 rounded-lg border text-xs ${
+              onClick={() => setViewingPlayerId(viewingPlayerId === p.id ? null : p.id)}
+              className={`flex-1 text-center py-1 px-1.5 rounded-lg border text-xs transition active:scale-95 ${
                 idx === gameState.turnPlayerIndex
-                  ? 'bg-slate-800 border-cyan-500/50 text-cyan-300'
-                  : 'bg-slate-900/60 border-slate-800 text-slate-400'
+                  ? 'bg-slate-800 border-cyan-500/60 text-cyan-300 shadow-sm shadow-cyan-500/20'
+                  : 'bg-slate-900/60 border-slate-800 text-slate-400 hover:border-slate-700'
               }`}
             >
-              <div className="truncate font-medium">{p.name}</div>
+              <div className="truncate font-medium flex items-center justify-center gap-1">
+                <span>{p.name}</span>
+                {p.id === activeMyBoard.id && <span className="text-[9px] text-cyan-400 font-bold">★</span>}
+              </div>
               <div className="text-sm font-bold text-slate-100">{p.score} pts</div>
-            </div>
+            </button>
           ))}
         </div>
       </header>
@@ -143,6 +236,7 @@ function AzulBoard({
           </div>
         )}
 
+        {/* 1. FACTORIES & CENTER POOL */}
         <section className="bg-slate-900/70 border border-slate-800/90 rounded-2xl p-3 shadow-lg">
           <h2 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2.5">
             Factories & Center Pool
@@ -227,23 +321,28 @@ function AzulBoard({
           </div>
         )}
 
+        {/* 2. ACTIVE PLAYER'S MOSAIC BOARD */}
         <section className="bg-slate-900/70 border border-slate-800/90 rounded-2xl p-3 shadow-lg space-y-3">
           <div className="flex items-center justify-between">
-            <h2 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
-              {activeBoard.name}&apos;s Mosaic Board
+            <h2 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+              <span>{activeMyBoard.name}&apos;s Mosaic Board</span>
+              <span className="text-[9px] bg-cyan-500/20 text-cyan-300 px-1.5 py-0.5 rounded font-bold border border-cyan-500/30">
+                ACTIVE
+              </span>
             </h2>
-            <span className="text-xs font-bold text-cyan-400">{activeBoard.score} Pts</span>
+            <span className="text-xs font-bold text-cyan-400">{activeMyBoard.score} Pts</span>
           </div>
 
           <div className="grid grid-cols-2 gap-3 items-center">
+            {/* Pattern Lines */}
             <div className="space-y-1.5">
               <span className="block text-[9px] text-slate-500 font-semibold uppercase tracking-wider mb-1 text-right pr-1">
                 Pattern Lines
               </span>
-              {activeBoard.patternLines.map((line, r) => {
+              {activeMyBoard.patternLines.map((line, r) => {
                 const validation =
                   selectedColor !== null
-                    ? isValidPlacement(activeBoard, selectedColor, r)
+                    ? isValidPlacement(activeMyBoard, selectedColor, r)
                     : { valid: false };
 
                 return (
@@ -277,6 +376,7 @@ function AzulBoard({
               })}
             </div>
 
+            {/* Wall Mosaic */}
             <div>
               <span className="block text-[9px] text-slate-500 font-semibold uppercase tracking-wider mb-1">
                 Wall Mosaic (5×5)
@@ -284,7 +384,7 @@ function AzulBoard({
               <div className="grid grid-cols-5 gap-1 bg-slate-950/90 p-1.5 rounded-xl border border-slate-800">
                 {WALL_LAYOUT.map((row, r) =>
                   row.map((wallColor, c) => {
-                    const isTiled = activeBoard.wall[r][c];
+                    const isTiled = activeMyBoard.wall[r][c];
                     return (
                       <div
                         key={`${r}-${c}`}
@@ -304,6 +404,7 @@ function AzulBoard({
             </div>
           </div>
 
+          {/* Floor Line */}
           <div className="pt-2 border-t border-slate-800">
             <div className="flex items-center justify-between mb-1.5">
               <span className="text-[10px] text-slate-400 font-semibold uppercase">
@@ -321,7 +422,7 @@ function AzulBoard({
 
             <div className="flex gap-1">
               {FLOOR_PENALTIES.map((penalty, idx) => {
-                const item = activeBoard.floor[idx];
+                const item = activeMyBoard.floor[idx];
                 return (
                   <div
                     key={idx}
@@ -343,6 +444,24 @@ function AzulBoard({
             </div>
           </div>
         </section>
+
+        {/* 3. OPPONENT BOARDS SECTION */}
+        {opponents.length > 0 && (
+          <section className="bg-slate-900/60 border border-slate-800 rounded-2xl p-3 shadow-lg space-y-3">
+            <div className="flex items-center justify-between">
+              <h2 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+                Opponents&apos; Boards ({opponents.length})
+              </h2>
+              <span className="text-[10px] text-slate-500">Live View</span>
+            </div>
+
+            <div className="space-y-2.5">
+              {opponents.map((opponent) => (
+                <MiniOpponentBoard key={opponent.id} player={opponent} />
+              ))}
+            </div>
+          </section>
+        )}
       </main>
     </div>
   );
@@ -395,7 +514,6 @@ export default function App() {
       supabase.removeChannel(channelRef.current);
     }
 
-    // Set self immediately
     const myPlayer: Player = {
       id: myId.current,
       name: cleanName,
@@ -404,7 +522,6 @@ export default function App() {
     };
     setPlayers([myPlayer]);
 
-    // Create a Supabase channel with Presence enabled
     const channel = supabase.channel(`azul_room_${cleanRoom}`, {
       config: {
         presence: {
@@ -430,7 +547,6 @@ export default function App() {
         });
       });
 
-      // Include self if presence hasn't echoed back yet
       if (!list.some((p) => p.id === myId.current)) {
         list.push({
           id: myId.current,
@@ -440,7 +556,6 @@ export default function App() {
         });
       }
 
-      // Sort alphabetically by ID so all devices agree on who the host is
       const sorted = [...list].sort((a, b) => a.id.localeCompare(b.id));
       sorted.forEach((p, idx) => {
         p.isHost = idx === 0;
@@ -474,7 +589,6 @@ export default function App() {
           setJoined(true);
           setError(null);
 
-          // Register in the presence pool
           await channel.track({
             id: myId.current,
             name: cleanName,
